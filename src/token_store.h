@@ -41,12 +41,13 @@ class TokenStore {
  private:
   TokenStore(Log *log, const std::string &path, bool enable_updates);
 
-  int Read();
-  int Write();
+  int Read(std::string *access_token, long *expiry);
+  int Write(const std::string &access_token, long expiry, const std::string &refresh_token);
 
   Log *const log_ = nullptr;
   const std::string path_;
   const bool enable_updates_;
+  bool is_remote_backend_; // True if path starts with http:// or https://
 
   // Normally these values come from the config file, but they can be overriden.
   std::optional<std::string> override_client_id_;
@@ -63,6 +64,12 @@ class TokenStore {
   time_t expiry_ = 0;
 
   int refresh_attempts_ = 0;
+  // Separate implementations for clarity
+  int ReadFromFile(std::string *access_token, long *expiry);
+  int ReadFromUrl(std::string *access_token, long *expiry);
+
+  int WriteToFile(const std::string &access_token, long expiry, const std::string &refresh_token);
+  int WriteToUrl(const std::string &access_token, long expiry, const std::string &refresh_token);
 };
 
 }  // namespace sasl_xoauth2

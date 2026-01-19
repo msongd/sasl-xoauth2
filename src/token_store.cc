@@ -30,6 +30,7 @@
 #include "config.h"
 #include "http.h"
 #include "log.h"
+#include <curl/curl.h>
 
 namespace sasl_xoauth2 {
 
@@ -172,10 +173,33 @@ int TokenStore::Refresh() {
   return Write();
 }
 
-TokenStore::TokenStore(Log *log, const std::string &path, bool enable_updates)
-    : log_(log), path_(path), enable_updates_(enable_updates) {}
+// Helper: Curl Write Callback to capture response into a string
+static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
 
-int TokenStore::Read() {
+TokenStore::TokenStore(Log *log, const std::string &path, bool enable_updates)
+    : log_(log), path_(path), enable_updates_(enable_updates) {
+        // Detect protocol
+            if (path_.find("http://") == 0 || path_.find("https://") == 0) {
+                is_remote_backend_ = true;
+            } else {
+                is_remote_backend_ = false;
+            }
+    }
+
+int TokenStore::Read(std::string *access_token, long *expiry) {
+    if (is_remote_backend_) return ReadFromUrl(access_token, expiry);
+    return ReadFromFile(access_token, expiry);
+}
+
+int TokenStore::Write(const std::string &access_token, long expiry, const std::string &refresh_token) {
+    if (is_remote_backend_) return WriteToUrl(access_token, expiry, refresh_token);
+    return WriteToFile(access_token, expiry, refresh_token);
+}
+
+int TokenStore::ReadFromFile(std::string *access_token, long *expiry) {
   try {
     log_->Write("TokenStore::Read: file=%s", path_.c_str());
 
@@ -220,7 +244,7 @@ int TokenStore::Read() {
   }
 }
 
-int TokenStore::Write() {
+int TokenStore::WriteToFile(const std::string &access_token, long expiry, const std::string &refresh_token) {
   const std::string new_path = path_ + "." + GetTempSuffix();
 
   if (!enable_updates_) {
@@ -267,5 +291,105 @@ int TokenStore::Write() {
 
   return 0;
 }
+// ==========================================
+// URL BACKEND (New Feature)
+// ==========================================
+int TokenStore::ReadFromUrl(std::string *access_token, long *expiry) {
+    CURL *curl;
+    CURLcode res;
+    std::string readBuffer;
+    bool success = false;
+    log_->Write("TokenStore::ReadFromUrl: file=%s", path_.c_str());
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, path_.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 10s timeout
 
+        // Handle redirects if necessary
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        res = curl_easy_perform(curl);
+
+        if (res == CURLE_OK) {
+            Json::Value root;
+            Json::Reader reader;
+
+            // Parse JSON from the network response string
+            if (reader.parse(readBuffer, root)) {
+                if (root.isMember("access_token") && root.isMember("expiry")) {
+                    *access_token = root["access_token"].asString();
+                    *expiry = root["expiry"].asInt64();
+                    success = true;
+                } else {
+                    log_->Write("TokenStore::ReadFromUrl: JSON missing required fields.");
+                    //std::cerr << "sasl-xoauth2: JSON missing required fields." << std::endl;
+                }
+            } else {
+                log_->Write("TokenStore::ReadFromUrl: Failed to parse JSON response.");
+                //std::cerr << "sasl-xoauth2: Failed to parse JSON response." << std::endl;
+            }
+        } else {
+            log_->Write("TokenStore::ReadFromUrl: GET request failed: %s", curl_easy_strerror(res));
+            //std::cerr << "sasl-xoauth2: GET request failed: " << curl_easy_strerror(res) << std::endl;
+        }
+        curl_easy_cleanup(curl);
+    }
+    return success;
+}
+
+int TokenStore::WriteToUrl(const std::string &access_token, long expiry, const std::string &refresh_token) {
+    CURL *curl;
+    CURLcode res;
+    bool success = false;
+
+    // Construct JSON object
+    Json::Value root;
+    root["access_token"] = access_token;
+    root["expiry"] = (Json::Value::Int64)expiry;
+    root["refresh_token"] = refresh_token;
+
+    // Serialize to string (FastWriter creates compact JSON)
+    Json::FastWriter writer;
+    std::string json_payload = writer.write(root);
+    log_->Write("TokenStore::WriteToUrl: file=%s", path_.c_str());
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, path_.c_str());
+
+        // Set Headers
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        // POST Payload
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_payload.c_str());
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+        // Capture response (optional, but good for debugging errors)
+        std::string responseBuffer;
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBuffer);
+
+        res = curl_easy_perform(curl);
+
+        if (res == CURLE_OK) {
+            long http_code = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+            // Accept 200 OK or 201 Created
+            if (http_code >= 200 && http_code < 300) {
+                success = true;
+            } else {
+                std::cerr << "sasl-xoauth2: POST failed with HTTP " << http_code << std::endl;
+            }
+        } else {
+            std::cerr << "sasl-xoauth2: POST request failed: " << curl_easy_strerror(res) << std::endl;
+        }
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+    }
+    return success;
+}
 }  // namespace sasl_xoauth2
