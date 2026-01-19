@@ -189,17 +189,17 @@ TokenStore::TokenStore(Log *log, const std::string &path, bool enable_updates)
             }
     }
 
-int TokenStore::Read(std::string *access_token, long *expiry) {
-    if (is_remote_backend_) return ReadFromUrl(access_token, expiry);
-    return ReadFromFile(access_token, expiry);
+int TokenStore::Read() {
+    if (is_remote_backend_) return ReadFromUrl();
+    return ReadFromFile();
 }
 
-int TokenStore::Write(const std::string &access_token, long expiry, const std::string &refresh_token) {
-    if (is_remote_backend_) return WriteToUrl(access_token, expiry, refresh_token);
-    return WriteToFile(access_token, expiry, refresh_token);
+int TokenStore::Write() {
+    if (is_remote_backend_) return WriteToUrl();
+    return WriteToFile();
 }
 
-int TokenStore::ReadFromFile(std::string *access_token, long *expiry) {
+int TokenStore::ReadFromFile() {
   try {
     log_->Write("TokenStore::Read: file=%s", path_.c_str());
 
@@ -244,7 +244,7 @@ int TokenStore::ReadFromFile(std::string *access_token, long *expiry) {
   }
 }
 
-int TokenStore::WriteToFile(const std::string &access_token, long expiry, const std::string &refresh_token) {
+int TokenStore::WriteToFile() {
   const std::string new_path = path_ + "." + GetTempSuffix();
 
   if (!enable_updates_) {
@@ -294,7 +294,7 @@ int TokenStore::WriteToFile(const std::string &access_token, long expiry, const 
 // ==========================================
 // URL BACKEND (New Feature)
 // ==========================================
-int TokenStore::ReadFromUrl(std::string *access_token, long *expiry) {
+int TokenStore::ReadFromUrl() {
     CURL *curl;
     CURLcode res;
     std::string readBuffer;
@@ -319,8 +319,31 @@ int TokenStore::ReadFromUrl(std::string *access_token, long *expiry) {
             // Parse JSON from the network response string
             if (reader.parse(readBuffer, root)) {
                 if (root.isMember("access_token") && root.isMember("expiry")) {
-                    *access_token = root["access_token"].asString();
-                    *expiry = root["expiry"].asInt64();
+                    //access_ = root["access_token"].asString();
+                    //expiry_ = root["expiry"].asInt64();
+                    Json::Value root;
+                    //file >> root;
+                    if (!root.isMember("refresh_token")) {
+                      log_->Write("TokenStore::Read: missing refresh_token");
+                      return SASL_FAIL;
+                    }
+
+                    ReadOverride(root, "client_id", &override_client_id_);
+                    ReadOverride(root, "client_secret", &override_client_secret_);
+                    ReadOverride(root, "token_endpoint", &override_token_endpoint_);
+                    ReadOverride(root, "proxy", &override_proxy_);
+                    ReadOverride(root, "ca_bundle_file", &override_ca_bundle_file_);
+                    ReadOverride(root, "ca_certs_dir", &override_ca_certs_dir_);
+
+                    if (root.isMember("refresh_window"))
+                      override_refresh_window_ = stoi(root["refresh_window"].asString());
+
+                    refresh_ = root["refresh_token"].asString();
+                    if (root.isMember("access_token"))
+                      access_ = root["access_token"].asString();
+                    if (root.isMember("expiry")) expiry_ = stoi(root["expiry"].asString());
+
+                    ReadOverride(root, "user", &user_);
                     success = true;
                 } else {
                     log_->Write("TokenStore::ReadFromUrl: JSON missing required fields.");
@@ -339,16 +362,28 @@ int TokenStore::ReadFromUrl(std::string *access_token, long *expiry) {
     return success;
 }
 
-int TokenStore::WriteToUrl(const std::string &access_token, long expiry, const std::string &refresh_token) {
+int TokenStore::WriteToUrl() {
     CURL *curl;
     CURLcode res;
     bool success = false;
 
     // Construct JSON object
     Json::Value root;
-    root["access_token"] = access_token;
-    root["expiry"] = (Json::Value::Int64)expiry;
-    root["refresh_token"] = refresh_token;
+    root["access_token"] = access_;
+    root["refresh_token"] = refresh_;
+    root["expiry"] = std::to_string(expiry_);
+
+    WriteOverride("user", user_, &root);
+    WriteOverride("client_id", override_client_id_, &root);
+    WriteOverride("client_secret", override_client_secret_, &root);
+    WriteOverride("token_endpoint", override_token_endpoint_, &root);
+    WriteOverride("proxy", override_proxy_, &root);
+    WriteOverride("ca_bundle_file", override_ca_bundle_file_, &root);
+    WriteOverride("ca_certs_dir", override_ca_certs_dir_, &root);
+
+    if (override_refresh_window_) {
+      root["refresh_window"] = std::to_string(*override_refresh_window_);
+    }
 
     // Serialize to string (FastWriter creates compact JSON)
     Json::FastWriter writer;
@@ -381,10 +416,12 @@ int TokenStore::WriteToUrl(const std::string &access_token, long expiry, const s
             if (http_code >= 200 && http_code < 300) {
                 success = true;
             } else {
-                std::cerr << "sasl-xoauth2: POST failed with HTTP " << http_code << std::endl;
+                log_->Write("TokenStore::WriteToUrl: POST failed with HTTP: %d", http_code);
+                //std::cerr << "sasl-xoauth2: POST failed with HTTP " << http_code << std::endl;
             }
         } else {
-            std::cerr << "sasl-xoauth2: POST request failed: " << curl_easy_strerror(res) << std::endl;
+            log_->Write("TokenStore::WriteToUrl: POST request failed: %s", curl_easy_strerror(res));
+            //std::cerr << "sasl-xoauth2: POST request failed: " << curl_easy_strerror(res) << std::endl;
         }
 
         curl_slist_free_all(headers);

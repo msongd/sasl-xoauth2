@@ -41,8 +41,8 @@ class TokenStore {
  private:
   TokenStore(Log *log, const std::string &path, bool enable_updates);
 
-  int Read(std::string *access_token, long *expiry);
-  int Write(const std::string &access_token, long expiry, const std::string &refresh_token);
+  int Read();
+  int Write();
 
   Log *const log_ = nullptr;
   const std::string path_;
@@ -65,11 +65,11 @@ class TokenStore {
 
   int refresh_attempts_ = 0;
   // Separate implementations for clarity
-  int ReadFromFile(std::string *access_token, long *expiry);
-  int ReadFromUrl(std::string *access_token, long *expiry);
+  int ReadFromFile();
+  int ReadFromUrl();
 
-  int WriteToFile(const std::string &access_token, long expiry, const std::string &refresh_token);
-  int WriteToUrl(const std::string &access_token, long expiry, const std::string &refresh_token);
+  int WriteToFile();
+  int WriteToUrl();
 };
 
 }  // namespace sasl_xoauth2
