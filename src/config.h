@@ -41,6 +41,7 @@ class Config {
   std::string proxy() const { return proxy_; }
   std::string ca_bundle_file() const { return ca_bundle_file_; }
   std::string ca_certs_dir() const { return ca_certs_dir_; }
+  std::string unix_socket_path() const { return unix_socket_path_; }
   int refresh_window() const { return refresh_window_; }
 
  private:
@@ -57,6 +58,7 @@ class Config {
   std::string proxy_ = "";
   std::string ca_bundle_file_ = "";
   std::string ca_certs_dir_ = "";
+  std::string unix_socket_path_ = "" ;
   int refresh_window_ = 10;  // seconds
 };
 

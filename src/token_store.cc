@@ -63,7 +63,42 @@ void WriteOverride(const std::string &key,
     (*output)[key] = *value;
   }
 }
+bool canAccessSocket(Log *log, const char* socketPath) {
+    // access() returns 0 on success, -1 on failure
+    // R_OK checks for Read permission
+    // W_OK checks for Write permission (needed to connect to a Unix socket)
+    if (access(socketPath, R_OK | W_OK) != -1) {
+        return true;
+    }
+    switch (errno) {
+        case ENOENT:
+            log->Write("Error: The socket file does not exist at path: %s", socketPath);
+            break;
 
+        case EACCES:
+            log->Write("Error: Permission denied. You do not have read/write access to: %s", socketPath);
+            break;
+
+        case ENOTDIR:
+            log->Write("Error: A component of the path is not a directory.");
+            break;
+
+            case ELOOP:
+                log->Write("Error: Too many symbolic links encountered in path.");
+                break;
+
+            case EROFS:
+                log->Write("Error: The socket is on a read-only file system.");
+                break;
+
+            default:
+                // For any other obscure errors, print the standard system message
+                log->Write("Error checking socket: %d", errno);
+                break;
+        }
+
+        return false;
+    }
 }  // namespace
 
 /* static */ std::unique_ptr<TokenStore> TokenStore::Create(
@@ -299,10 +334,20 @@ int TokenStore::ReadFromUrl() {
     CURLcode res;
     std::string readBuffer;
     bool success = false;
-    log_->Write("TokenStore::ReadFromUrl: file=%s", path_.c_str());
+
+    std::string unix_socket_path = Config::Get()->unix_socket_path();
+    log_->Write("TokenStore::ReadFromUrl: file=%s sock=%s", path_.c_str(), unix_socket_path.c_str());
+    if (unix_socket_path.empty()) {
+        return SASL_FAIL;
+    }
+    if (!canAccessSocket(log_,unix_socket_path.c_str())) {
+        log_->Write("TokenStore::ReadFromUrl: Unable to access socket: sock=%s", unix_socket_path.c_str());
+        return SASL_FAIL;
+    }
     curl = curl_easy_init();
     if (curl) {
         curl_easy_setopt(curl, CURLOPT_URL, path_.c_str());
+        curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, unix_socket_path.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 10s timeout
@@ -365,7 +410,7 @@ int TokenStore::ReadFromUrl() {
 int TokenStore::WriteToUrl() {
     CURL *curl;
     CURLcode res;
-    bool success = false;
+    int success = 0;
 
     // Construct JSON object
     Json::Value root;
@@ -388,9 +433,19 @@ int TokenStore::WriteToUrl() {
     // Serialize to string (FastWriter creates compact JSON)
     Json::FastWriter writer;
     std::string json_payload = writer.write(root);
-    log_->Write("TokenStore::WriteToUrl: file=%s", path_.c_str());
+    std::string unix_socket_path = Config::Get()->unix_socket_path();
+    log_->Write("TokenStore::WriteToUrl: file=%s sock=%s", path_.c_str(), unix_socket_path.c_str());
+    if (unix_socket_path.empty()) {
+        return SASL_FAIL;
+    }
+    if (!canAccessSocket(log_, unix_socket_path.c_str())) {
+        log_->Write("TokenStore::ReadFromUrl: Unable to access socket: sock=%s", unix_socket_path.c_str());
+        return SASL_FAIL;
+    }
+
     curl = curl_easy_init();
     if (curl) {
+        curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, unix_socket_path.c_str());
         curl_easy_setopt(curl, CURLOPT_URL, path_.c_str());
 
         // Set Headers
