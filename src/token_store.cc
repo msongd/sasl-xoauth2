@@ -333,7 +333,7 @@ int TokenStore::ReadFromUrl() {
     CURL *curl;
     CURLcode res;
     std::string readBuffer;
-    bool success = false;
+    int success = SASL_FAIL;
 
     std::string unix_socket_path = Config::Get()->unix_socket_path();
     log_->Write("TokenStore::ReadFromUrl: file=%s sock=%s", path_.c_str(), unix_socket_path.c_str());
@@ -389,13 +389,14 @@ int TokenStore::ReadFromUrl() {
                     if (root.isMember("expiry")) expiry_ = stoi(root["expiry"].asString());
 
                     ReadOverride(root, "user", &user_);
-                    success = true;
+                    success = SASL_OK;
                 } else {
-                    log_->Write("TokenStore::ReadFromUrl: JSON missing required fields.");
+                    log_->Write("TokenStore::ReadFromUrl: JSON missing required fields: access_token and expiry");
                     //std::cerr << "sasl-xoauth2: JSON missing required fields." << std::endl;
                 }
             } else {
                 log_->Write("TokenStore::ReadFromUrl: Failed to parse JSON response.");
+                log_->Write("TokenStore::ReadFromUrl: Response: %s", readBuffer.c_str());
                 //std::cerr << "sasl-xoauth2: Failed to parse JSON response." << std::endl;
             }
         } else {
@@ -463,19 +464,21 @@ int TokenStore::WriteToUrl() {
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBuffer);
 
         res = curl_easy_perform(curl);
-
+        success = SASL_FAIL;
         if (res == CURLE_OK) {
             long http_code = 0;
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
             // Accept 200 OK or 201 Created
             if (http_code >= 200 && http_code < 300) {
-                success = true;
+                success = SASL_OK;
             } else {
                 log_->Write("TokenStore::WriteToUrl: POST failed with HTTP: %d", http_code);
+                log_->Write("TokenStore::WriteToUrl: Response: %s", responseBuffer.c_str());
                 //std::cerr << "sasl-xoauth2: POST failed with HTTP " << http_code << std::endl;
             }
         } else {
             log_->Write("TokenStore::WriteToUrl: POST request failed: %s", curl_easy_strerror(res));
+            log_->Write("TokenStore::WriteToUrl: Response: %s", responseBuffer.c_str());
             //std::cerr << "sasl-xoauth2: POST request failed: " << curl_easy_strerror(res) << std::endl;
         }
 
