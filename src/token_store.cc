@@ -63,42 +63,6 @@ void WriteOverride(const std::string &key,
     (*output)[key] = *value;
   }
 }
-bool canAccessSocket(Log *log, const char* socketPath) {
-    // access() returns 0 on success, -1 on failure
-    // R_OK checks for Read permission
-    // W_OK checks for Write permission (needed to connect to a Unix socket)
-    if (access(socketPath, R_OK | W_OK) != -1) {
-        return true;
-    }
-    switch (errno) {
-        case ENOENT:
-            log->Write("Error: The socket file does not exist at path: %s", socketPath);
-            break;
-
-        case EACCES:
-            log->Write("Error: Permission denied. You do not have read/write access to: %s", socketPath);
-            break;
-
-        case ENOTDIR:
-            log->Write("Error: A component of the path is not a directory.");
-            break;
-
-            case ELOOP:
-                log->Write("Error: Too many symbolic links encountered in path.");
-                break;
-
-            case EROFS:
-                log->Write("Error: The socket is on a read-only file system.");
-                break;
-
-            default:
-                // For any other obscure errors, print the standard system message
-                log->Write("Error checking socket: %d", errno);
-                break;
-        }
-
-        return false;
-    }
 }  // namespace
 
 /* static */ std::unique_ptr<TokenStore> TokenStore::Create(
@@ -153,7 +117,6 @@ int TokenStore::Refresh() {
   long response_code = 0;
   log_->Write("TokenStore::Refresh: token_endpoint: %s",
               token_endpoint.c_str());
-  log_->Write("TokenStore::Refresh: request: %s", request.c_str());
 
   std::string http_error;
   int err = HttpPost({.url = token_endpoint,
@@ -169,8 +132,7 @@ int TokenStore::Refresh() {
     return err;
   }
 
-  log_->Write("TokenStore::Refresh: code=%d, response=%s", response_code,
-              response.c_str());
+  log_->Write("TokenStore::Refresh: code=%d", response_code);
 
   if (response_code != 200) {
     log_->Write("TokenStore::Refresh: request failed");
@@ -186,7 +148,7 @@ int TokenStore::Refresh() {
       return SASL_BADPROT;
     }
     access_ = root["access_token"].asString();
-    int expiry_sec = stoi(root["expires_in"].asString());
+    int expiry_sec = stoll(root["expires_in"].asString());
     if (expiry_sec <= 0) {
       log_->Write("TokenStore::Refresh: invalid expiry");
       return SASL_BADPROT;
@@ -260,17 +222,16 @@ int TokenStore::ReadFromFile() {
     ReadOverride(root, "ca_certs_dir", &override_ca_certs_dir_);
 
     if (root.isMember("refresh_window"))
-      override_refresh_window_ = stoi(root["refresh_window"].asString());
+      override_refresh_window_ = stoll(root["refresh_window"].asString());
 
     refresh_ = root["refresh_token"].asString();
     if (root.isMember("access_token"))
       access_ = root["access_token"].asString();
-    if (root.isMember("expiry")) expiry_ = stoi(root["expiry"].asString());
+    if (root.isMember("expiry")) expiry_ = stoll(root["expiry"].asString());
 
     ReadOverride(root, "user", &user_);
 
-    log_->Write("TokenStore::Read: refresh=%s, access=%s, user=%s",
-                refresh_.c_str(), access_.c_str(), user_.value_or("").c_str());
+    log_->Write("TokenStore::Read: user=%s", user_.value_or("").c_str());
     return SASL_OK;
 
   } catch (const std::exception &e) {
@@ -340,107 +301,110 @@ int TokenStore::ReadFromUrl() {
     if (unix_socket_path.empty()) {
         return SASL_FAIL;
     }
-    if (!canAccessSocket(log_,unix_socket_path.c_str())) {
-        log_->Write("TokenStore::ReadFromUrl: Unable to access socket: sock=%s", unix_socket_path.c_str());
-        return SASL_FAIL;
-    }
-    curl = curl_easy_init();
-    if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, path_.c_str());
-        curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, unix_socket_path.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 10s timeout
+        curl = curl_easy_init();
+        if (curl) {
+            curl_easy_setopt(curl, CURLOPT_URL, path_.c_str());
+            curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, unix_socket_path.c_str());
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // 10s timeout
 
-        // Handle redirects if necessary
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+            // Handle redirects if necessary
+            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-        res = curl_easy_perform(curl);
+            res = curl_easy_perform(curl);
 
-        if (res == CURLE_OK) {
-            Json::Value root;
-            Json::Reader reader;
-
-            // Parse JSON from the network response string
-            if (reader.parse(readBuffer, root)) {
-                if (root.isMember("access_token") && root.isMember("expiry")) {
-                    //access_ = root["access_token"].asString();
-                    //expiry_ = root["expiry"].asInt64();
+            if (res == CURLE_OK) {
+                try {
                     Json::Value root;
-                    //file >> root;
-                    if (!root.isMember("refresh_token")) {
-                      log_->Write("TokenStore::Read: missing refresh_token");
-                      return SASL_FAIL;
+                    Json::Reader reader;
+
+                    // Parse JSON from the network response string
+                    if (reader.parse(readBuffer, root)) {
+                        if (root.isMember("access_token") && root.isMember("expiry")) {
+                            //access_ = root["access_token"].asString();
+                            //expiry_ = root["expiry"].asInt64();
+                            //file >> root;
+                            if (!root.isMember("refresh_token")) {
+                            log_->Write("TokenStore::Read: missing refresh_token");
+                            return SASL_FAIL;
+                            }
+
+                            ReadOverride(root, "client_id", &override_client_id_);
+                            ReadOverride(root, "client_secret", &override_client_secret_);
+                            ReadOverride(root, "token_endpoint", &override_token_endpoint_);
+                            ReadOverride(root, "proxy", &override_proxy_);
+                            ReadOverride(root, "ca_bundle_file", &override_ca_bundle_file_);
+                            ReadOverride(root, "ca_certs_dir", &override_ca_certs_dir_);
+
+                            if (root.isMember("refresh_window"))
+                                override_refresh_window_ = stoll(root["refresh_window"].asString());
+
+                            refresh_ = root["refresh_token"].asString();
+                            if (root.isMember("access_token"))
+                                access_ = root["access_token"].asString();
+                            if (root.isMember("expiry")) expiry_ = stoll(root["expiry"].asString());
+
+                            ReadOverride(root, "user", &user_);
+                            success = SASL_OK;
+                        } else {
+                            log_->Write("TokenStore::ReadFromUrl: JSON missing required fields: access_token and expiry");
+                            //std::cerr << "sasl-xoauth2: JSON missing required fields." << std::endl;
+                        }
+                    } else {
+                        log_->Write("TokenStore::ReadFromUrl: Failed to parse JSON response.");
+                        //std::cerr << "sasl-xoauth2: Failed to parse JSON response." << std::endl;
                     }
-
-                    ReadOverride(root, "client_id", &override_client_id_);
-                    ReadOverride(root, "client_secret", &override_client_secret_);
-                    ReadOverride(root, "token_endpoint", &override_token_endpoint_);
-                    ReadOverride(root, "proxy", &override_proxy_);
-                    ReadOverride(root, "ca_bundle_file", &override_ca_bundle_file_);
-                    ReadOverride(root, "ca_certs_dir", &override_ca_certs_dir_);
-
-                    if (root.isMember("refresh_window"))
-                      override_refresh_window_ = stoi(root["refresh_window"].asString());
-
-                    refresh_ = root["refresh_token"].asString();
-                    if (root.isMember("access_token"))
-                      access_ = root["access_token"].asString();
-                    if (root.isMember("expiry")) expiry_ = stoi(root["expiry"].asString());
-
-                    ReadOverride(root, "user", &user_);
-                    success = SASL_OK;
-                } else {
-                    log_->Write("TokenStore::ReadFromUrl: JSON missing required fields: access_token and expiry");
-                    //std::cerr << "sasl-xoauth2: JSON missing required fields." << std::endl;
+                } catch (const std::exception &e) {
+                  log_->Write("TokenStore::Write: exception=%s", e.what());
+                  return SASL_FAIL;
                 }
+
             } else {
-                log_->Write("TokenStore::ReadFromUrl: Failed to parse JSON response.");
-                log_->Write("TokenStore::ReadFromUrl: Response: %s", readBuffer.c_str());
-                //std::cerr << "sasl-xoauth2: Failed to parse JSON response." << std::endl;
+                log_->Write("TokenStore::ReadFromUrl: GET request failed: %s", curl_easy_strerror(res));
+                //std::cerr << "sasl-xoauth2: GET request failed: " << curl_easy_strerror(res) << std::endl;
             }
-        } else {
-            log_->Write("TokenStore::ReadFromUrl: GET request failed: %s", curl_easy_strerror(res));
-            //std::cerr << "sasl-xoauth2: GET request failed: " << curl_easy_strerror(res) << std::endl;
+            curl_easy_cleanup(curl);
         }
-        curl_easy_cleanup(curl);
-    }
     return success;
 }
 
 int TokenStore::WriteToUrl() {
     CURL *curl;
     CURLcode res;
-    int success = 0;
+    int success = SASL_FAIL;
+    std::string json_payload ;
+    try {
+        // Construct JSON object
+        Json::Value root;
+        root["access_token"] = access_;
+        root["refresh_token"] = refresh_;
+        root["expiry"] = std::to_string(expiry_);
 
-    // Construct JSON object
-    Json::Value root;
-    root["access_token"] = access_;
-    root["refresh_token"] = refresh_;
-    root["expiry"] = std::to_string(expiry_);
+        WriteOverride("user", user_, &root);
+        WriteOverride("client_id", override_client_id_, &root);
+        WriteOverride("client_secret", override_client_secret_, &root);
+        WriteOverride("token_endpoint", override_token_endpoint_, &root);
+        WriteOverride("proxy", override_proxy_, &root);
+        WriteOverride("ca_bundle_file", override_ca_bundle_file_, &root);
+        WriteOverride("ca_certs_dir", override_ca_certs_dir_, &root);
 
-    WriteOverride("user", user_, &root);
-    WriteOverride("client_id", override_client_id_, &root);
-    WriteOverride("client_secret", override_client_secret_, &root);
-    WriteOverride("token_endpoint", override_token_endpoint_, &root);
-    WriteOverride("proxy", override_proxy_, &root);
-    WriteOverride("ca_bundle_file", override_ca_bundle_file_, &root);
-    WriteOverride("ca_certs_dir", override_ca_certs_dir_, &root);
+        if (override_refresh_window_) {
+        root["refresh_window"] = std::to_string(*override_refresh_window_);
+        }
 
-    if (override_refresh_window_) {
-      root["refresh_window"] = std::to_string(*override_refresh_window_);
+        // Serialize to string (FastWriter creates compact JSON)
+        Json::FastWriter writer;
+        json_payload = writer.write(root);
+    } catch (const std::exception &e) {
+      log_->Write("TokenStore::Write: exception=%s", e.what());
+      return SASL_FAIL;
     }
 
-    // Serialize to string (FastWriter creates compact JSON)
-    Json::FastWriter writer;
-    std::string json_payload = writer.write(root);
+
     std::string unix_socket_path = Config::Get()->unix_socket_path();
     log_->Write("TokenStore::WriteToUrl: file=%s sock=%s", path_.c_str(), unix_socket_path.c_str());
     if (unix_socket_path.empty()) {
-        return SASL_FAIL;
-    }
-    if (!canAccessSocket(log_, unix_socket_path.c_str())) {
-        log_->Write("TokenStore::ReadFromUrl: Unable to access socket: sock=%s", unix_socket_path.c_str());
         return SASL_FAIL;
     }
 
@@ -472,13 +436,12 @@ int TokenStore::WriteToUrl() {
             if (http_code >= 200 && http_code < 300) {
                 success = SASL_OK;
             } else {
+                success = SASL_FAIL;
                 log_->Write("TokenStore::WriteToUrl: POST failed with HTTP: %d", http_code);
-                log_->Write("TokenStore::WriteToUrl: Response: %s", responseBuffer.c_str());
                 //std::cerr << "sasl-xoauth2: POST failed with HTTP " << http_code << std::endl;
             }
         } else {
             log_->Write("TokenStore::WriteToUrl: POST request failed: %s", curl_easy_strerror(res));
-            log_->Write("TokenStore::WriteToUrl: Response: %s", responseBuffer.c_str());
             //std::cerr << "sasl-xoauth2: POST request failed: " << curl_easy_strerror(res) << std::endl;
         }
 
