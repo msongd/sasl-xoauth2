@@ -25,7 +25,6 @@
 #include <unistd.h>
 
 #include <fstream>
-#include <iostream>
 #include <sstream>
 
 #include "config.h"
@@ -179,7 +178,6 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *use
 
 TokenStore::TokenStore(Log *log, const std::string &path, bool enable_updates)
     : log_(log), path_(path), enable_updates_(enable_updates) {
-        std::cout << "sasl-xoauth2: TokenStore::TokenStore: path=" << path << std::endl;
         // Detect protocol
             if (path_.find("http://") == 0 || path_.find("https://") == 0) {
                 is_remote_backend_ = true;
@@ -299,7 +297,6 @@ int TokenStore::ReadFromUrl() {
     int success = SASL_FAIL;
 
     std::string unix_socket_path = Config::Get()->unix_socket_path();
-    std::cout << "TokenStore::ReadFromUrl: socket:" << unix_socket_path << std::endl;
     log_->Write("TokenStore::ReadFromUrl: file=%s sock=%s", path_.c_str(), unix_socket_path.c_str());
     if (unix_socket_path.empty()) {
         return SASL_FAIL;
@@ -352,11 +349,9 @@ int TokenStore::ReadFromUrl() {
                             success = SASL_OK;
                         } else {
                             log_->Write("TokenStore::ReadFromUrl: JSON missing required fields: access_token and expiry");
-                            std::cerr << "sasl-xoauth2: JSON missing required fields." << std::endl;
                         }
                     } else {
                         log_->Write("TokenStore::ReadFromUrl: Failed to parse JSON response.");
-                        std::cerr << "sasl-xoauth2: Failed to parse JSON response." << std::endl;
                     }
                 } catch (const std::exception &e) {
                   log_->Write("TokenStore::Write: exception=%s", e.what());
@@ -365,7 +360,6 @@ int TokenStore::ReadFromUrl() {
 
             } else {
                 log_->Write("TokenStore::ReadFromUrl: GET request failed: %s", curl_easy_strerror(res));
-                std::cerr << "sasl-xoauth2: GET request failed: " << curl_easy_strerror(res) << std::endl;
             }
             curl_easy_cleanup(curl);
         }
@@ -405,7 +399,6 @@ int TokenStore::WriteToUrl() {
     }
 
     std::string unix_socket_path = Config::Get()->unix_socket_path();
-    std::cout << "TokenStore::WriteToUrl: socket:" << unix_socket_path << std::endl;
     log_->Write("TokenStore::WriteToUrl: file=%s sock=%s", path_.c_str(), unix_socket_path.c_str());
     if (unix_socket_path.empty()) {
         return SASL_FAIL;
@@ -441,11 +434,9 @@ int TokenStore::WriteToUrl() {
             } else {
                 success = SASL_FAIL;
                 log_->Write("TokenStore::WriteToUrl: POST failed with HTTP: %d", http_code);
-                //std::cerr << "sasl-xoauth2: POST failed with HTTP " << http_code << std::endl;
             }
         } else {
             log_->Write("TokenStore::WriteToUrl: POST request failed: %s", curl_easy_strerror(res));
-            //std::cerr << "sasl-xoauth2: POST request failed: " << curl_easy_strerror(res) << std::endl;
         }
 
         curl_slist_free_all(headers);
